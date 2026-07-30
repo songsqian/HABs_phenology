@@ -1,0 +1,414 @@
+---
+title: "Western Lake Erie HABs phenology using BHM"
+author: "Song Qian"
+date: "2026-03-12"
+format: pdf
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Initial setup
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+source("FrontMatter_cmdStan.R")
+knitr::opts_chunk$set(echo = TRUE)
+load(paste(saveDIR, "eriedata_08_21.RData", sep="/"))
+load(paste(saveDIR, "eriedata_08_24.RData", sep="/"))
+```
+
+## Smoothed Hocky-Stick Model (sHSM)
+
+Modeling a uni-modal seasonal pattern using the smoothed hockey-stick model (sHSM). - sHSM: $$
+y = \beta_0+\beta_1(x-x_{mid}) + \delta\cdot scal\cdot \log\left (1+e^{\frac{x-x_{mid}}{scal}}\right )
+$$ where $y$ is the log concentration and $x$ is the ordinal date. The model parameter $x_{mid}$ is the date when the peak concentration is reached, $scal$ is the smoothness parameter, $\beta_1$ is the slope (rate of increase on log concentration) before the peak, $\delta$ is the slope difference (i.e., $\beta_1+\delta$ is the slope after peak), and $\beta_0$ is the peak log concentration without smoothing. The smoothed peak is $\beta_0+\delta\cdot scal\cdot \log(2)$. The smoothness parameter ($scal$) and the difference in slope ($\delta$) appear in the equation as a product. As a result, they cannot easily be estimated both as free parameters.
+
+```{r}
+#| message: false
+packages(VGAM)  ## log1p_exp  ### doesn't work for rv objects
+sHSM <- function(x, beta_0, beta_1, beta_2, phi, lambda){
+  return(beta_0 + beta_1 * (x - phi) + 
+           (beta_2-beta_1) * lambda * 
+           log(1+exp((x-phi)/lambda)))
+}
+```
+
+In its original scale, MC and Chla concentrations are modeled as a function of date ($x$): $$
+f(x) = e^{\beta_0+\beta_1(x-x_{mid}) + \delta\cdot scal\cdot \log\left (1+e^{\frac{x-x_{mid}}{scal}}\right )}
+$$ The first order derivative is $$
+\left(\frac{{\delta}\mathrm{e}^{\frac{x - x_{mid}}{scal}}}{\mathrm{e}^{\frac{x - x_{mid}}{scal}} + 1} + {\beta}_{1}\right) f(x) 
+$$ The root of the derivative is $$
+scal\cdot \ln\left(-\frac{{\beta}_{1}}{{\delta} + {\beta}_{1}}\right) + x_{mid}
+$$ which is the peak location. The second derivative of the model is (checked manually):
+
+$$
+\left(\frac{{\delta}\mathrm{e}^{\frac{x - x_{mid}}{scal}}}{scal \left(\mathrm{e}^{\frac{x - x_{mid}}{scal}} + 1\right)} - \frac{{\delta}\mathrm{e}^{\frac{2 \left(x - x_{mid}\right)}{scal}}}{scal \left(\mathrm{e}^{\frac{x - x_{mid}}{scal}} + 1\right)^{2}}\right) f(x) + \left(\frac{{\delta}\mathrm{e}^{\frac{x - x_{mid}}{scal}}}{\mathrm{e}^{\frac{x - x_{mid}}{scal}} + 1} + {\beta}_{1}\right)^{2} f(x)
+$$ To find the roots (inflection points), we re-express the second order derivative with respect to $z=\mathrm{e}^{\frac{x-x_{mid}}{scal}}$ as follows: $$
+f(x)\left (\frac{\delta z}{scal(1+z)} - \frac{\delta z^2}{scal(1+z)^2} + \left(\beta_1+\frac{\delta z}{1+z} \right )^2\right )
+$$ which can be simplified to be a quadratic form with respect to $z$: $$
+f(x)\left (\frac{scal(\beta_1+\delta)^2z^2+\left (2scal\beta_1(\beta_1+\delta)+\delta\right )z + scal\beta_1^2}{scal(1+z)^2}\right )
+$$ Let $a=scal(\beta_1+\delta)^2, b=2scal\beta_1(\beta_1+\delta) + \delta$, and $c=scal\beta_1^2$, the roots with respect to $z$ are: $$
+z_{root} = \frac{-b\pm\sqrt{b^2-4ac}}{2a}
+$$ and the inflection points are: $$
+x = x_{mid} +scal \log\left( \frac{-b\pm\sqrt{b^2-4ac}}{2a}\right)
+$$ To check the accuracy of my algebra, I derived the roots by expressing the second order derivative with respect to $z^{-1}=\mathrm{e}^{-\frac{x-x_{mid}}{scal}}$: $$
+f(x)\left (\frac{\delta }{scal(1+z^{-1})} - \frac{\delta}{scal(1+z^{-1})^2} + \left(\beta_1+\frac{\delta}{1+z^{-1}} \right )^2\right )
+$$ and the quadratic form with respect to $z^{-1}$ is: $$
+f(x)\left (\frac{scal\beta_1^2(z^{-1})^2+(\delta+2scal\beta_1(\beta_1+\delta))z^{-1}+scal(\beta_1+\delta)^2}{scal(1+z^{-1})^2} \right )
+$$ The root with respect to $x^{-1}$ is: $$
+z_{root}^{-1} = \frac{-b\pm\sqrt{b^2-4ac}}{2c}
+$$ To verify the result, I expressed the quadratic form with respect to $z$: $$
+az^2+bz+c = a\left (\frac{1}{z^{-1}}\right )^2+b\left (\frac{1}{z^{-1}}\right )+c = \frac{a+bz^{-1}+c(z^{-1})^2}{(z^{-1})^2}
+$$ which shows that the derived $z_{root}$ and $z_{root}^{-1}$ are correct.
+
+The inflection point is where the rate of rise (or decline) of MC or Chla concentration is at the maximum. A numerically more efficient way to get the inflection points may be directly calculate the daily first-order derivatives and pick the minimum and the maximum (?).
+
+## hierarchical model for MC/Chla phenology
+
+model: y = b0 + b1(x-Phi)+ (b2)*lambda*Log(1 + e\^(x-phi/lambda))
+
+y = log concentration x = day b0 = y-intercept of peak concentration b1 = rising slope b2 = descending slope (negative) phi = day of peak concentration lambda = smoothness parameter, shape of curve
+
+Compared to the year (temporal) model, the year-site (spatial-temporal) model
+
+```{r}
+#| label: BHM_stan
+#| eval: false
+## with censorship
+habs_bhm <- "
+data {
+  int<lower=0> n; // sample size
+  array[n] real x; // day
+  int<lower=0> ncens; // censored sample size
+  array[ncens] real xcens;  
+  int<lower=1> yr;// number of years
+  array[n] int<lower=1, upper=yr> year; 
+  // year index - each data point assigned to a year
+  array[ncens] int<lower=1, upper=yr> yearcens; //
+  array[n] real y; // observed log MC/Chla at day x
+  array[ncens] real ycens; // detection limits
+  array[yr] real lambda; 
+  // smoothness parameter, 0.1, different for each year
+  vector[yr] xlow; // first day of sampling
+  vector[yr] xup; // last day of sampling
+}
+parameters {
+  vector<lower=0>[yr] b1; 
+  // rising slope by year (positive)
+  vector<upper=0>[yr] b2;
+  // descending slope by year (negative)
+  vector[yr] b0; // peak concentration
+  vector[yr] logit_phi_raw; 
+  // raw phi value, fraction of range since beginning - 
+  // impose hierarchical structure on this parameter
+  // hyperparameters
+  real<lower=0> mu_b1; // 
+  real<lower=0> sigma_b1;   
+  
+  real<upper=0> mu_b2; // must be negative                    
+  real<lower=0> sigma_b2;    
+  
+  real mu_b0; // 
+  real<lower=0> sigma_b0;   
+  
+  real mu_phi_raw; //         
+  real<lower=0> sigma_phi_raw;
+  
+  vector<lower=0, upper=10>[yr] sigma; // noise sd indexed by year
+}
+transformed parameters {
+  vector[yr] phi_raw; // phi_raw constrained between 0 - 1
+  vector[yr] phi; //
+  vector[yr] delta;
+  vector[n] mu;
+  vector[ncens] mucens;
+  vector<lower=0>[n] sig; 
+  vector<lower=0>[ncens] sigcens; 
+  
+  delta = b2 - b1;
+  
+  for(i in 1:yr){
+    phi_raw[i] = inv_logit(logit_phi_raw[i]);
+    phi[i] = xlow[i] + (xup[i] - xlow[i]) * phi_raw[i];
+    // transformed phi using x low and up
+  }
+  for (i in 1:n){
+    mu[i] = b0[year[i]] + b1[year[i]] * (x[i]-phi[year[i]]) +
+      (delta[year[i]]) * lambda[year[i]] *
+      log1p_exp((x[i]-phi[year[i]])/lambda[year[i]]); 
+    sig[i] = sigma[year[i]]; 
+  }
+  for (i in 1:ncens){
+    mucens[i] = b0[yearcens[i]] + 
+      b1[yearcens[i]] * (xcens[i]-phi[yearcens[i]]) + 
+      (delta[yearcens[i]]) * lambda[yearcens[i]] * 
+        log1p_exp((xcens[i]-phi[yearcens[i]]) / 
+        lambda[yearcens[i]]); 
+    sigcens[i] = sigma[yearcens[i]]; 
+  }
+}
+model {
+  mu_b1 ~ normal(0, 5); // priors for mu
+  mu_b2 ~ normal(0, 5);
+  mu_b0 ~ normal(0, 5); 
+  mu_phi_raw ~ normal(0, 5);
+  
+  sigma_b1 ~ normal(0, 2); // priors for sigma
+  sigma_b2 ~ normal(0, 2);
+  sigma_b0 ~ normal(0, 2); 
+  sigma_phi_raw ~ normal(0, 2);
+  
+  sigma ~ normal(0,2);
+  
+  b1 ~ normal(mu_b1, sigma_b1); 
+  b2 ~ normal(mu_b2, sigma_b2);
+  b0 ~ normal(mu_b0, sigma_b0); 
+  logit_phi_raw ~ normal(mu_phi_raw, sigma_phi_raw);
+  
+  target += normal_lpdf(y | mu, sig);
+  target += normal_lcdf(ycens | mucens, sigcens);
+}
+"
+
+## without censorship
+habs_bhm_nocens <- "
+data {
+  int<lower=0> n; // sample size
+  array[n] real x; // day
+  int<lower=1> yr;// number of years
+  array[n] int<lower=1, upper=yr> year; 
+  // year index - each data point assigned to a year
+  array[n] real y; // observed log MC/Chla at day x
+  array[yr] real lambda;
+  // smoothness parameter, 0.1, different for each year
+  vector[yr] xlow; // first day of sampling
+  vector[yr] xup; // last day of sampling
+}
+parameters {
+  vector<lower=0>[yr] b1; // rising slope by year (positive)
+  vector<upper=0>[yr] b2; 
+  // descending slope by year (negative)
+  vector[yr] b0; // peak concentration
+  vector[yr] logit_phi_raw; 
+  // raw phi value, fraction of range since beginning - 
+  // impose hierarchical structure on this parameter
+  
+  // hyperparameters
+  real<lower=0> mu_b1; // 
+  real<lower=0> sigma_b1;   
+  
+  real<upper=0> mu_b2; // must be negative                    
+  real<lower=0> sigma_b2;    
+  
+  real mu_b0; // 
+  real<lower=0> sigma_b0;   
+  
+  real mu_phi_raw; //         
+  real<lower=0> sigma_phi_raw;
+  
+  vector<lower=0, upper=10>[yr] sigma; 
+  // noise sd indexed by year
+}
+transformed parameters {
+  vector[yr] phi_raw; 
+  // phi_raw constrained between 0 - 1
+  vector[yr] phi; //
+  vector[yr] delta;
+  vector[n] mu;
+  vector<lower=0>[n] sig; 
+
+  delta = b2 - b1;
+  
+  for(i in 1:yr){
+    phi_raw[i] = inv_logit(logit_phi_raw[i]);
+    phi[i] = xlow[i] + (xup[i] - xlow[i]) * phi_raw[i]; 
+    // transformed phi using x low and up
+  }
+  for (i in 1:n){
+    mu[i] = b0[year[i]] + b1[year[i]] * (x[i]-phi[year[i]]) +
+    (delta[year[i]]) * lambda[year[i]] *
+    log1p_exp((x[i]-phi[year[i]])/lambda[year[i]]); 
+    sig[i] = sigma[year[i]]; 
+  }
+}
+model {
+  mu_b1 ~ normal(0, 5); // priors for mu
+  mu_b2 ~ normal(0, 5);
+  mu_b0 ~ normal(0, 5); 
+  mu_phi_raw ~ normal(0, 5);
+  
+  sigma_b1 ~ normal(0, 2); // priors for sigma
+  sigma_b2 ~ normal(0, 2);
+  sigma_b0 ~ normal(0, 2); 
+  sigma_phi_raw ~ normal(0, 2);
+  
+  sigma ~ normal(0,2);
+  
+  b1 ~ normal(mu_b1, sigma_b1); 
+  b2 ~ normal(mu_b2, sigma_b2);
+  b0 ~ normal(mu_b0, sigma_b0); 
+  logit_phi_raw ~ normal(mu_phi_raw, sigma_phi_raw);
+  
+  y ~ normal(mu, sig);
+}
+"
+## Compile
+habsModel <- write_stan_file(habs_bhm)
+habsModel_nocens<-write_stan_file(habs_bhm_nocens)
+
+mod_HABs_cens <- cmdstan_model(habsModel)
+mod_HABs_nocens <- cmdstan_model(habsModel_nocens)
+
+save(mod_HABs_cens, mod_HABs_nocens, 
+     file=paste(saveDIR,"HabsModelMCChla_cmdStan.RData", sep="/"))
+```
+
+Loading compiled models
+
+```{r}
+load(paste(saveDIR,"HabsModelMCChla_cmdStan.RData", sep="/"))
+# load stan model
+```
+
+### Executing the model
+
+1.  Input data function
+2.  Running the model
+
+```{r}
+#| label: input_function
+#| eval: true
+
+infile <- function(data=eriedata08_21, y_col="part_mc",
+                   n.chains=nchains,
+                   censor=T, censored_at=0.1){
+##  data[data[,y_col]<=censored_at, y_col] <- censored_at
+  data$yrs <- as.numeric(ordered(format(data$Date,
+                                        format="%Y")))
+  yr <- max(data$yrs)
+  data$days <- as.numeric(format(data$Date, format="%j"))
+  xlow <- tapply(data$days, data$yrs, min)
+  xup <- tapply(data$days, data$yrs, max)
+  
+  if(censor){
+    temp <- data[,y_col] <= censored_at
+    datacens <- data[temp,]
+    data2 <- data[!temp,]
+    n <- dim(data2)[1]
+    ncens=dim(datacens)[1]
+    y <- data2[,y_col]
+    ycens <- censored_at
+    indata <- list(n=n, x=data2$days, y=log(y), 
+                   year=data2$yrs, ncens=ncens,
+                   xcens=datacens$days,
+                   ycens=log(rep(ycens, ncens)),
+                   yearcens=datacens$yrs,
+                   yr=yr, xlow=xlow, xup=xup, 
+                   lambda=0.01*(xup-xlow))
+  } else {
+    n <- dim(data)[1]
+    y <- data[,y_col]
+    indata <- list(n=n, x=data$days, y=log(y), year=data$yrs,
+                   yr=yr, xlow=xlow, xup=xup, 
+                   lambda=0.01*(xup-xlow))
+  }
+  pars=c("b1", "b2", "phi", "b0", "mu_b0", "mu_b1",
+         "mu_b2", "mu_phi_raw", "sigma_b0","sigma_b1",
+         "sigma_b2", "sigma_phi_raw", "sigma")
+  inits <- list()
+  for (i in 1:n.chains){
+    tmp = abs(runif(indata$yr))
+    tmp2 = abs(runif(1))
+    inits[[i]] <- list(
+      b1 = tmp,
+      b2 = -tmp - abs(runif(indata$yr)),
+      b0 = rnorm(indata$yr) + max(log(y))/2,
+      logit_phi_raw = rnorm(indata$yr),
+      mu_b1 = tmp2,
+      mu_b2 = -tmp2 - abs(runif(1)),
+      mu_b0 = rnorm(1) + max(log(y))/2,
+      mu_phi_raw = rnorm(1),
+      sigma_b1 = runif(1),
+      sigma_b2 = runif(1),
+      sigma_b0 = runif(1),
+      sigma_phi_raw = runif(1),
+      sigma = runif(indata$yr)         
+    )
+  }
+  return(list(data=indata, inits=inits, pars=pars))
+}
+```
+
+```{r}
+#| label: Running the model
+#| eval: false
+input.to.stan <- infile(n.chains = nchains)
+### run model ### about 460/990 seconds on ThinkStation/miniPC
+fitall <- mod_HABs_cens$sample( 
+                 data = input.to.stan$data, 
+                 init = input.to.stan$inits,
+                 parallel_chains = nchains,
+                 chains = nchains,
+                 iter_warmup = niters/2,
+                 iter_sampling = niters/2,
+                 thin = nthin, 
+                 refresh = niters/10, 
+                 output_dir = saveDIR)
+fitall$summary(variables=input.to.stan$pars)
+fitall$summary(variables=c("mu_b0","mu_b1","mu_b2","mu_phi_raw"))
+
+input.to.stan24 <- infile(data=eriedata08_24, n.chains = nchains)
+### run model ### about 700/1200 seconds on ThinkStation/miniPC
+fitall24<-mod_HABs_cens$sample( 
+                 data = input.to.stan24$data, 
+                 init = input.to.stan24$inits,
+                 parallel_chains = nchains,
+                 chains = nchains,
+                 iter_warmup = niters/2,
+                 iter_sampling = niters/2,
+                 thin = nthin, 
+                 refresh = niters/10, 
+                 output_dir = saveDIR)
+
+fitall24$summary(variables=input.to.stan24$pars)
+fitall24$summary(variables=c("mu_b0","mu_b1","mu_b2","mu_phi_raw"))
+
+### run model ### about 700/1840 seconds on ThinkStation/miniPC
+chla_0 <- is.na(eriedata08_24$Chla) | eriedata08_24$Chla<=0.01
+input.to.stan.chla <- infile(data=eriedata08_24[!chla_0, ],
+                             y_col="Chla", 
+                             censor = F, n.chains = nchains)
+
+fitall_chla <- mod_HABs_nocens$sample( 
+                 data = input.to.stan.chla$data, 
+                 init = input.to.stan.chla$inits,
+                 parallel_chains = nchains,
+                 chains = nchains,
+                 iter_warmup = niters/2,
+                 iter_sampling = niters/2,
+                 thin = nthin, 
+                 refresh = niters/10, 
+                 output_dir = saveDIR)
+
+fitall_chla$summary(variables=input.to.stan.chla$pars)
+fitall_chla$summary(variables=c("mu_b0","mu_b1","mu_b2","mu_phi_raw"))
+
+
+save(fitall, fitall24, fitall_chla, 
+     file=paste(saveDIR, "fitall1_cmdstan.RData", sep="/"))
+```
+
+```{r}
+#| label: model_results
+input.to.stan <- infile()
+input.to.stan24 <- infile(data=eriedata08_24)
+chla_0 <- is.na(eriedata08_24$Chla) | eriedata08_24$Chla<=0.01
+input.to.stan.chla <- infile(data=eriedata08_24[!chla_0, ],
+                             y_col="Chla", 
+                             censor = F, n.chains = nchains)
+save(input.to.stan, input.to.stan24, chla_0, input.to.stan.chla, file=paste(saveDIR, "input_to_stan.RData", sep="/"))
+```
+

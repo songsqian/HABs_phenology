@@ -1,0 +1,135 @@
+---
+title: "ErieMC2025 -- Chla"
+author: "Song Qian"
+date: "2026-05-21"
+format: pdf
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+R code for analyzing MC analysis results
+
+## Initial setup
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+source("FrontMatter.R")
+knitr::opts_chunk$set(echo = TRUE)
+load(paste(saveDIR, "eriedata_08_21.RData", sep="/"))
+load(paste(saveDIR, "eriedata_08_24.RData", sep="/"))
+
+packages(VGAM)  ## log1p_exp  ### doesn't work for rv objects
+sHSM <- function(x, beta_0, beta_1, beta_2, phi, lambda){
+  return(beta_0 + beta_1 * (x - phi) + 
+           (beta_2-beta_1) * lambda * 
+           log(1+exp((x-phi)/lambda)))
+}
+
+load(paste(saveDIR, "fitall1.RData", sep="/"))
+load(paste(saveDIR, "input_to_stan.RData", sep="/"))
+```
+
+## Plotting the Fitted Model
+
+Using the `rv package`:
+
+1.  Extract model coefficients
+2.  Extract annual data
+3.  Plotting the fitted annual models
+
+```{R}
+#| label: extracting_model
+md_chla <- fitall_chla
+yrs <- 2008:2024
+yy_chla <- "Chla"
+YL_chla <- "Chl-a ($\\mu$g/L)"
+plt_data <- eriedata08_24
+lmbd_chla <- input.to.stan.chla$data$lambda
+thr_mc <- 7
+file_name_chla <- "/BHM_Chla"
+file_name_chla_log <- "/BHM_Chla_log"
+
+## annual model parameters -- chla
+b0_chla  <- rvsims(as.matrix(as.data.frame(extract(md_chla, pars="b0"))))
+b1_chla  <- rvsims(as.matrix(as.data.frame(extract(md_chla, pars="b1"))))
+b2_chla  <- rvsims(as.matrix(as.data.frame(extract(md_chla, pars="b2"))))
+phi_chla <- rvsims(as.matrix(as.data.frame(extract(md_chla, pars="phi"))))
+sigma_chla <- rvsims(as.matrix(as.data.frame(extract(md_chla, 
+                                                pars="sigma"))))
+## plotting data
+plt_data$yrs <- (ordered(format(plt_data$Date, format="%Y")))
+plt_data$days <- as.numeric(format(plt_data$Date, format="%j"))
+
+day_range <- range(plt_data$days)
+x_days <- seq(day_range[1], day_range[2],,100)
+
+xyplot(log(Chla)~days|yrs, data=plt_data)
+
+## Using rv summary statistics
+yr_lvl <- levels(plt_data$yrs)
+
+##############
+## in log concentration -- Chla
+for (i in 1:length(yr_lvl)){
+  temp1 <- plt_data[plt_data$yrs==yr_lvl[i],]
+##  temp2 <- cbind(x_days, summary(exp(hockey_smooth(x=x_days, 
+##                           beta0=b0[i], beta1=b1[i], 
+##                           delta=b2[i]-b1[i],
+##                           phi=phi[i]))))
+  temp2 <- cbind(x_days, summary((hockey_smooth(x=x_days,
+                                                beta0=b0_chla[i],
+                                                beta1=b1_chla[i], 
+                                        delta=b2_chla[i]-b1_chla[i],
+                                                phi=phi_chla[i]))))
+  names(temp2) <- c( "x_days", "mean", "sd", "X1",
+                     "X2.5", "X25", "X50", "X75", "X97.5",
+                     "X99", "sims" )
+##  tikz(file=paste(plotDIR, file_name_chla_log, yr_lvl[i], 
+##  ".tex", sep=""), height=4, width=5, standAlone = T)
+  par(mar=c(4,3,3,1), mgp=c(1.5, 0.5,0), las=1, tck=-0.01)
+  plot(temp1$days, log(temp1[,yy_chla]), type="n", 
+       main=yr_lvl[i], xlab="Days since Jan 1", 
+       ylab=YL_chla)
+  polygon(x=c(temp2$x_days, rev(temp2$x_day)), 
+          c(temp2$X2.5, rev(temp2$X97.5)),
+          density=NA, col=gray(0.75))
+  polygon(x=c(temp2$x_days, rev(temp2$x_day)), 
+          c(temp2$X25, rev(temp2$X75)), 
+          density=NA, col=gray(0.5))
+  lines(temp2$x_days, temp2$mean, lwd=2)
+  points(temp1$days, log(temp1[,yy_chla]), cex=0.75)  
+##  dev.off()
+}
+
+## in concentration
+for (i in 1:length(yr_lvl)){
+  temp1 <- plt_data[plt_data$yrs==yr_lvl[i],]
+  temp2 <- cbind(x_days, summary(exp(hockey_smooth(x=x_days,
+                                                beta0=b0_chla[i],
+                                                beta1=b1_chla[i], 
+                                        delta=b2_chla[i]-b1_chla[i],
+                                                phi=phi_chla[i]))))
+  names(temp2) <- c( "x_days", "mean", "sd", "X1",
+                     "X2.5", "X25", "X50", "X75", "X97.5",
+                     "X99", "sims" )
+##  tikz(file=paste(plotDIR, file_name_chla, yr_lvl[i], 
+##  ".tex", sep=""), height=4, width=5, standAlone = T)
+  par(mar=c(4,3,3,1), mgp=c(1.5, 0.5,0), las=1, tck=-0.01)
+  plot(temp1$days, (temp1[,yy_chla]), type="n", 
+       main=yr_lvl[i], xlab="Days since Jan 1", 
+       ylab=YL_chla)
+  polygon(x=c(temp2$x_days, rev(temp2$x_day)), 
+          c(temp2$X2.5, rev(temp2$X97.5)),
+          density=NA, col=gray(0.75))
+  polygon(x=c(temp2$x_days, rev(temp2$x_day)), 
+          c(temp2$X25, rev(temp2$X75)), 
+          density=NA, col=gray(0.5))
+  lines(temp2$x_days, temp2$mean, lwd=2)
+  points(temp1$days, (temp1[,yy_chla]), cex=0.75)  
+##  dev.off()
+}
+
+```
